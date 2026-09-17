@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
+from collections import OrderedDict
 from pathlib import Path
 
 import torch
@@ -63,14 +65,69 @@ class TinyScorer(nn.Module):
         )
 
 
+class OptionCache:
+    """Remember pooled option vectors for option batches seen before.
+
+    The frozen encoder never changes, so identical option tokens always pool to
+    identical vectors. Closed-set data repeats the same option list on every
+    row, and without this the encoder spends nearly all of its time re-encoding
+    that list: on Banking77 (77 options, batch 8) one epoch took over 33
+    minutes uncached and 33 seconds cached, with the same loss curve. The key
+    is a hash of the exact token ids and mask, so any change in the options,
+    their order or their padding is a miss. Bounded, least recently used out.
+    """
+
+    def __init__(self, capacity: int = 64) -> None:
+        self.capacity = capacity
+        self.hits = 0
+        self.misses = 0
+        self._store: OrderedDict[bytes, torch.Tensor] = OrderedDict()
+
+    @staticmethod
+    def key(option_ids: torch.Tensor, option_token_mask: torch.Tensor) -> bytes:
+        digest = hashlib.sha1(str(tuple(option_ids.shape)).encode())
+        digest.update(option_ids.detach().cpu().contiguous().numpy().tobytes())
+        digest.update(option_token_mask.detach().cpu().contiguous().numpy().tobytes())
+        return digest.digest()
+
+    def lookup(self, option_ids, option_token_mask, encode):
+        """Return pooled options, calling ``encode(ids, mask)`` only on a miss."""
+        if self.capacity <= 0:
+            return encode(option_ids, option_token_mask)
+        key = self.key(option_ids, option_token_mask)
+        pooled = self._store.get(key)
+        if pooled is not None and pooled.device == option_ids.device:
+            self.hits += 1
+            self._store.move_to_end(key)
+            return pooled
+        self.misses += 1
+        pooled = encode(option_ids, option_token_mask)
+        self._store[key] = pooled
+        while len(self._store) > self.capacity:
+            self._store.popitem(last=False)
+        return pooled
+
+
 class FrozenTransformerScorer(nn.Module):
-    def __init__(self, model_name: str, rank: int) -> None:
+    def __init__(self, model_name: str, rank: int, option_cache: int = 64) -> None:
         super().__init__()
         from transformers import AutoModel
 
         self.encoder = AutoModel.from_pretrained(model_name)
         self.encoder.requires_grad_(False).eval()
         self.head = AttentionHead(self.encoder.config.hidden_size, rank)
+        self.option_cache = OptionCache(option_cache)
+
+    def encode_options(self, option_ids: torch.Tensor, option_token_mask: torch.Tensor):
+        shape = option_ids.shape
+        flat_ids = option_ids.reshape(-1, shape[-1])
+        flat_mask = option_token_mask.reshape(-1, shape[-1])
+        hidden = self.encoder(
+            input_ids=flat_ids, attention_mask=flat_mask,
+        ).last_hidden_state
+        pooled = (hidden * flat_mask.unsqueeze(-1)).sum(1)
+        pooled = pooled / flat_mask.sum(1, keepdim=True).clamp_min(1)
+        return pooled.reshape(shape[0], shape[1], -1)
 
     def forward(self, batch: dict[str, torch.Tensor], shuffle_context: bool = False):
         self.encoder.eval()
@@ -79,15 +136,9 @@ class FrozenTransformerScorer(nn.Module):
                 input_ids=batch["context_ids"],
                 attention_mask=batch["context_mask"],
             ).last_hidden_state
-            shape = batch["option_ids"].shape
-            flat_ids = batch["option_ids"].reshape(-1, shape[-1])
-            flat_mask = batch["option_token_mask"].reshape(-1, shape[-1])
-            hidden = self.encoder(
-                input_ids=flat_ids, attention_mask=flat_mask,
-            ).last_hidden_state
-            pooled = (hidden * flat_mask.unsqueeze(-1)).sum(1)
-            pooled = pooled / flat_mask.sum(1, keepdim=True).clamp_min(1)
-            options = pooled.reshape(shape[0], shape[1], -1)
+            options = self.option_cache.lookup(
+                batch["option_ids"], batch["option_token_mask"], self.encode_options,
+            )
         return self.head(
             context, batch["context_mask"], options, batch["option_mask"],
             shuffle_context,
