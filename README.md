@@ -95,6 +95,8 @@ jevlike-train data/synthetic/train.jsonl \
   --batch-size 8
 ```
 
+Pooled option vectors are cached across batches (`OptionCache`, 64 entries, keyed on the exact option tokens), so a closed option list that repeats on every row is encoded once instead of once per batch. Pass `option_cache=0` to `FrozenTransformerScorer` to switch it off.
+
 The checkpoint stores the trained scorer head and the encoder name. It does not copy the frozen encoder weights. Loading the checkpoint therefore needs access to the same Hugging Face model.
 
 `--rank` sets the width of the small scorer head. A wider head has more trainable weights and uses more memory.
