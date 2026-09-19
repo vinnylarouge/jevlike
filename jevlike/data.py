@@ -118,7 +118,8 @@ def synthetic_example(seed: int) -> ChoiceExample:
     options = {target}
     while len(options) < count:
         options.add(f"{rng.choice(COLOURS)} {rng.choice(ANIMALS)}")
-    options = list(options)
+    # Stabilise set iteration order before the seeded shuffle.
+    options = sorted(options)
     rng.shuffle(options)
     notes = " ".join(rng.choice(("north", "south", "east", "west")) for _ in range(8))
     context = f"Choose the exact badge {target}. Notes: {notes}. Badge: {target}."
