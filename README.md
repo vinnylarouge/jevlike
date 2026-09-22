@@ -47,6 +47,7 @@ Use one JSON object per line:
 
 `label` is the zero-based index of the correct option. Each row may have a different number of options, with a minimum of two.
 
+
 ## Quickstart
 
 Run these commands from the repository root. They create local synthetic data, train on it, evaluate the saved model and score one new menu.
@@ -66,6 +67,13 @@ jevlike-predict runs/synthetic.pt \
   --option "azure crane" \
   --option "amber badger" \
   --option "gold heron"
+```
+
+The same checkpoint also accepts the [request format](#request-format) on a file or on standard input:
+
+```sh
+jevlike-predict runs/synthetic.pt --request request.json
+jevlike-predict runs/synthetic.pt --request - < request.json
 ```
 
 The evaluation prints top-1 accuracy, which is the fraction of correct first choices. Top-3 accuracy is the fraction with the right answer among the three highest scores. Expected calibration error compares confidence with observed accuracy. The command also prints a shuffled-context control, which pairs each menu with the wrong context. A useful model should beat that control.
@@ -111,6 +119,51 @@ jevlike-train data/wikispeedia/jsonl/train.jsonl \
 ```
 
 Cite Robert West and Jure Leskovec, *Human Wayfinding in Information Networks*, WWW 2012. Review the source data terms on the [SNAP dataset page](https://snap.stanford.edu/data/wikispeedia.html).
+
+## Jev Standard Request
+
+`jevlike-predict --request` takes one `state` and a set of named `questions`, the shape [TypeSafe's Choice primitive](https://docs.typesafe.ai/primitives/choice) uses:
+
+```json
+{
+  "state": "My running shoes arrived in the wrong size. Can I swap them for a size 10?",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which team should handle this?",
+      "criteria": {
+        "returns": "Exchanges, wrong or damaged items",
+        "shipping": "Delivery status, delays, lost packages",
+        "billing": "Charges, invoices, payment problems"
+      }
+    }
+  }
+}
+```
+
+`questions` is a map from your own question id to a question. The id names the answer and is never sent to the model. Each question needs `instructions`, which is the ask, and `criteria`, which is a map from option name to description. `type` is always `choice` and may be left out. `instructions` may be a string, an object or an array; objects and arrays are flattened into readable lines. A criteria description may be `null` when the name speaks for itself.
+
+The response carries one answer per question, the model version and the token counts:
+
+```json
+{
+  "model": "jevlike-0.1.0",
+  "answers": {
+    "department": {
+      "type": "choice",
+      "choice": "returns",
+      "confidence": 0.98,
+      "probabilities": {"returns": 0.99, "shipping": 0.01, "billing": 0.0}
+    }
+  },
+  "usage": {"input_tokens": 202, "output_tokens": 3}
+}
+```
+
+`choice` is the highest-scoring option, `probabilities` covers every option and sums to one, and `confidence` is the gap between the best and second best option, so a sharp single peak scores near 1 and a flat spread scores near 0. `usage` counts the context and option tokens that went in and the options that came back.
+
+The interaction layer is only a dialect. Underneath, each question still becomes one context of `state` plus `instructions` and one option per criteria name, descriptions included, so the scorer is unchanged. Two consequences follow. Descriptions share the checkpoint's `--option-tokens` budget, so a long description can be cut; raise it and retrain if your criteria are wordy. And the context is one `state` plus one question's instructions, so keep `state` inside `--context-tokens`.
+
 
 ## What to expect
 
