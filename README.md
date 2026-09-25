@@ -68,7 +68,7 @@ jevlike-predict runs/synthetic.pt \
   --option "gold heron"
 ```
 
-The evaluation prints top-1 accuracy, which is the fraction of correct first choices. Top-3 accuracy is the fraction with the right answer among the three highest scores. Expected calibration error compares confidence with observed accuracy. The command also prints a shuffled-context control, which pairs each menu with the wrong context. A useful model should beat that control.
+The evaluation prints top-1 accuracy, which is the fraction of correct first choices. Top-3 accuracy is the fraction with the right answer among the three highest scores. Expected calibration error compares confidence with observed accuracy. It also prints a shuffled-context control, which pairs each menu with a different context drawn from the full evaluation set, and a blank-context baseline, which scores the options without text context. The first tests whether the pairing matters; the second measures choices without context.
 
 ## Use your own data
 
