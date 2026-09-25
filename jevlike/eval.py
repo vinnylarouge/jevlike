@@ -1,4 +1,4 @@
-"""Evaluate accuracy, calibration and a shuffled-context control."""
+"""Evaluate accuracy, calibration, shuffled-context and blank-context controls."""
 
 from __future__ import annotations
 
@@ -6,21 +6,77 @@ import argparse
 import json
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, SequentialSampler
 
-from .data import JsonlDataset
+from .data import ChoiceExample, JsonlDataset
 from .model import load_checkpoint, select_device
 from .train import move
 
 
+def _global_shuffle_sources(size: int) -> list[int]:
+    """Return one deterministic derangement of row indices for the full dataset."""
+    if size < 2:
+        return list(range(size))
+    generator = torch.Generator().manual_seed(0)
+    order = torch.randperm(size, generator=generator)
+    sources = torch.empty_like(order)
+    sources[order] = order.roll(1)
+    return sources.tolist()
+
+
 @torch.no_grad()
-def metrics(model, loader, device, shuffle_context=False):
+def metrics(model, loader, device, shuffle_context=False, blank_context=False):
+    if shuffle_context and blank_context:
+        raise ValueError("choose either shuffled_context or blank_context")
+    context_sources = None
+    if shuffle_context:
+        if not isinstance(loader.sampler, SequentialSampler) or loader.drop_last:
+            raise ValueError(
+                "global shuffled-context evaluation requires a sequential loader "
+                "that includes every example"
+            )
+        context_sources = _global_shuffle_sources(len(loader.dataset))
+
     model.eval()
     top1 = top3 = total = 0
     confidences, predictions, labels = [], [], []
+    offset = 0
     for host_batch in loader:
         batch = move(host_batch, device)
-        logits = model(batch, shuffle_context=shuffle_context).cpu()
+        batch_size = batch["labels"].numel()
+        if context_sources is not None:
+            targets = [
+                loader.dataset[index]
+                for index in range(offset, offset + batch_size)
+            ]
+            paired = [
+                ChoiceExample(
+                    loader.dataset[source_index].context,
+                    target.options,
+                    target.label,
+                )
+                for source_index, target in zip(
+                    context_sources[offset:offset + batch_size], targets
+                )
+            ]
+            contexts = loader.collate_fn(paired)
+            batch["context_ids"] = contexts["context_ids"].to(device)
+            batch["context_mask"] = contexts["context_mask"].to(device)
+        elif blank_context:
+            tokenizer = getattr(loader.collate_fn, "tokenizer", None)
+            pad_id = getattr(tokenizer, "pad_token_id", 0)
+            if pad_id is None:
+                pad_id = 0
+            batch["context_ids"] = torch.full(
+                (batch_size, 1), pad_id, dtype=batch["context_ids"].dtype,
+                device=device,
+            )
+            batch["context_mask"] = torch.ones(
+                (batch_size, 1), dtype=torch.bool, device=device,
+            )
+
+        logits = model(batch).cpu()
+        offset += batch_size
         probabilities = logits.softmax(-1)
         ranking = logits.topk(min(3, logits.shape[1]), dim=-1).indices
         batch_labels = batch["labels"].cpu()
@@ -31,6 +87,8 @@ def metrics(model, loader, device, shuffle_context=False):
         confidences.append(confidence)
         predictions.append(prediction)
         labels.append(batch["labels"].cpu())
+    if context_sources is not None and offset != len(context_sources):
+        raise ValueError("global shuffled-context evaluation did not cover the dataset")
     confidence, prediction, labels = map(
         torch.cat, (confidences, predictions, labels)
     )
@@ -63,6 +121,7 @@ def main() -> None:
     print(json.dumps({
         "model": metrics(model, loader, device),
         "shuffled_context": metrics(model, loader, device, True),
+        "blank_context": metrics(model, loader, device, blank_context=True),
         "device": str(device),
     }, indent=2))
 
