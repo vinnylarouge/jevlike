@@ -134,7 +134,7 @@ def trainable_state(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def load_checkpoint(path: str | Path, device: torch.device):
-    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
     model, collator = make_system(payload["config"], device)
     missing, unexpected = model.load_state_dict(payload["state_dict"], strict=False)
     if unexpected or any(not name.startswith("encoder.") for name in missing):
